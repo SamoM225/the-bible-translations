@@ -182,18 +182,38 @@ const loadRows = async () => {
   }
   isLoading.value = true
   errorMessage.value = ''
-  const { data, error } = await supabase
-    .from(tableName)
-    .select('*')
-    .in('language_code', selectedLanguageCodes.value)
 
-  if (error) {
-    errorMessage.value = error.message
-    rows.value = []
-  } else {
-    rows.value = (data ?? []) as Row[]
+  const allRows: Row[] = []
+  const pageSize = 1000
+  let fromIndex = 0
+  let keepLoading = true
+
+  while (keepLoading) {
+    const toIndex = fromIndex + pageSize - 1
+    const { data, error } = await supabase
+      .from(tableName)
+      .select('*')
+      .in('language_code', selectedLanguageCodes.value)
+      .range(fromIndex, toIndex)
+
+    if (error) {
+      errorMessage.value = error.message
+      rows.value = []
+      isLoading.value = false
+      return
+    }
+
+    const batch = (data ?? []) as Row[]
+    allRows.push(...batch)
+
+    if (batch.length < pageSize) {
+      keepLoading = false
+    } else {
+      fromIndex += pageSize
+    }
   }
 
+  rows.value = allRows
   isLoading.value = false
 }
 
@@ -204,9 +224,9 @@ const loadLanguages = async () => {
     .order('name')
   languages.value = data ?? []
   if (!selectedLanguageCodes.value.length && languages.value.length) {
-    selectedLanguageCodes.value = [languages.value[0]?.code || '']
+    selectedLanguageCodes.value = [languages.value[0].code]
   }
-  if (!translationForm.value.language_code && languages.value.length && languages.value[0]) {
+  if (!translationForm.value.language_code && languages.value.length) {
     translationForm.value.language_code = languages.value[0].code
   }
 }
@@ -225,7 +245,7 @@ const confirmLanguageSelection = async () => {
   }
   showLanguageSelectModal.value = false
   if (!selectedLanguageCodes.value.includes(translationForm.value.language_code)) {
-    translationForm.value.language_code = selectedLanguageCodes.value[0] || ''
+    translationForm.value.language_code = selectedLanguageCodes.value[0]
   }
   await loadRows()
 }
@@ -573,18 +593,18 @@ onMounted(async () => {
         </header>
         <div class="language-toolbar">
           <label class="language-toggle">
-            <input type="checkbox" :checked="allLanguagesSelected" @change="toggleSelectAllLanguages" />
+            <input
+              type="checkbox"
+              :checked="allLanguagesSelected"
+              @change="toggleSelectAllLanguages"
+            />
             <span>Vybrat vsetky</span>
           </label>
           <button class="ghost" type="button" @click="selectedLanguageCodes = []">Vycistit</button>
         </div>
         <div class="language-grid">
           <label v-for="lang in languages" :key="lang.code" class="language-card">
-            <input
-              type="checkbox"
-              :value="lang.code"
-              v-model="selectedLanguageCodes"
-            />
+            <input type="checkbox" :value="lang.code" v-model="selectedLanguageCodes" />
             <div>
               <strong>{{ lang.name }}</strong>
               <span>{{ lang.code }}</span>
