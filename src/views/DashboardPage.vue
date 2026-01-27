@@ -330,6 +330,26 @@ const addLanguage = async () => {
     return
   }
 
+  try {
+    const { data: sessionData } = await supabase.auth.getSession()
+    const token = sessionData.session?.access_token
+
+    const response = await fetch(`${import.meta.env.VITE_SUPABASE_URL}/functions/v1/add-language-translation`, {
+      method: 'POST',
+      headers: {
+        'Content-Type': 'application/json',
+        ...(token ? { Authorization: `Bearer ${token}` } : {}),
+      },
+      body: JSON.stringify({ target_language: payload.code }),
+    })
+
+    if (!response.ok) {
+      errorMessage.value = 'Nepodarilo sa spustit edge funkciu pre preklady.'
+    }
+  } catch {
+    errorMessage.value = 'Nepodarilo sa spustit edge funkciu pre preklady.'
+  }
+
   await loadLanguages()
   resetLanguageForm()
   showLanguageModal.value = false
