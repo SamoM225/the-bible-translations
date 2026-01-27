@@ -19,6 +19,12 @@ type Language = {
   percent_translated?: number | null
 }
 
+type BatchRow = {
+  translation_key: string
+  source_text: string
+  category?: string
+}
+
 const loggedIn = supabase.auth.getUser().then(({ data: { user } }) => user)
 if (!loggedIn) {
   window.location.href = '/login'
@@ -35,6 +41,7 @@ const search = ref('')
 const showLanguageModal = ref(false)
 const showTranslationModal = ref(false)
 const showLanguageSelectModal = ref(true)
+const showBatchModal = ref(false)
 
 const selectedLanguageCodes = ref<string[]>([])
 
@@ -64,6 +71,13 @@ const nameFilter = ref('')
 const categoryFilter = ref('all')
 const dateFrom = ref('')
 const dateTo = ref('')
+
+const batchFileName = ref('')
+const batchDelimiter = ref('')
+const batchRows = ref<BatchRow[]>([])
+const batchError = ref('')
+const batchIsParsing = ref(false)
+const batchIsSending = ref(false)
 
 const selectedLanguagesLabel = computed(() => {
   if (!selectedLanguageCodes.value.length) {
@@ -272,9 +286,22 @@ const resetFilters = () => {
   dateTo.value = ''
 }
 
+const resetBatch = () => {
+  batchFileName.value = ''
+  batchDelimiter.value = ''
+  batchRows.value = []
+  batchError.value = ''
+  batchIsParsing.value = false
+}
+
 const openAddTranslation = () => {
   resetTranslationForm()
   showTranslationModal.value = true
+}
+
+const openBatchUpload = () => {
+  resetBatch()
+  showBatchModal.value = true
 }
 
 const openEditTranslation = (row: Row) => {
@@ -393,6 +420,195 @@ const goToPage = (page: number) => {
   currentPage.value = next
 }
 
+const detectDelimiter = (text: string) => {
+  const sample = text.split(/\r?\n/).filter((line) => line.trim()).slice(0, 5)
+  const candidates = [',', ';', '\t', '|']
+  let best = ','
+  let bestScore = 0
+
+  for (const candidate of candidates) {
+    const counts = sample.map((line) => line.split(candidate).length)
+    const score = counts.length ? Math.min(...counts) : 0
+    if (score > bestScore) {
+      bestScore = score
+      best = candidate
+    }
+  }
+
+  return best
+}
+
+const parseCsvLine = (line: string, delimiter: string) => {
+  const result: string[] = []
+  let current = ''
+  let inQuotes = false
+
+  for (let i = 0; i < line.length; i += 1) {
+    const char = line[i]
+    const next = line[i + 1]
+
+    if (char === '"' && inQuotes && next === '"') {
+      current += '"'
+      i += 1
+      continue
+    }
+
+    if (char === '"') {
+      inQuotes = !inQuotes
+      continue
+    }
+
+    if (char === delimiter && !inQuotes) {
+      result.push(current.trim())
+      current = ''
+      continue
+    }
+
+    current += char
+  }
+
+  result.push(current.trim())
+  return result
+}
+
+const parseDelimitedText = (text: string, delimiter: string) => {
+  const lines = text.split(/\r?\n/).filter((line) => line.trim())
+  if (!lines.length) {
+    return [] as BatchRow[]
+  }
+
+  const headerLine = lines[0].replace(/^\uFEFF/, '')
+  let header = parseCsvLine(headerLine, delimiter).map((item) => item.trim().toLowerCase())
+  
+  // If header has only one item and it contains the delimiter, it might be a malformed CSV
+  // Try re-parsing the header without treating it as a CSV line
+  if (header.length === 1 && header[0].includes(delimiter)) {
+    header = header[0].split(delimiter).map((item) => item.trim().toLowerCase())
+  }
+  
+  // Find translation_key column
+  const translationKeyIndex = header.indexOf('translation_key')
+  // Find source_text or translated_text column
+  const sourceTextIndex = header.indexOf('source_text')
+  const translatedTextIndex = header.indexOf('translated_text')
+  const textIndex = sourceTextIndex >= 0 ? sourceTextIndex : translatedTextIndex
+  // Find category column
+  const categoryIndex = header.indexOf('category')
+
+  if (translationKeyIndex === -1 || textIndex === -1) {
+    throw new Error('CSV/TSV musi obsahovat stlpce: translation_key a source_text (alebo translated_text). Nadene stlpce: ' + header.join(', '))
+  }
+
+  return lines.slice(1).map((line) => {
+    const parts = parseCsvLine(line, delimiter)
+    return {
+      translation_key: parts[translationKeyIndex] ?? '',
+      source_text: parts[textIndex] ?? '',
+      category: categoryIndex >= 0 ? parts[categoryIndex] ?? '' : '',
+    }
+  })
+}
+
+const parseXml = (text: string) => {
+  const parser = new DOMParser()
+  const xml = parser.parseFromString(text, 'application/xml')
+  if (xml.querySelector('parsererror')) {
+    throw new Error('XML nie je validne')
+  }
+
+  const items = Array.from(xml.querySelectorAll('translation, item, row'))
+  if (!items.length) {
+    throw new Error('XML neobsahuje ziadne <translation> alebo <item> prvky')
+  }
+
+  return items.map((item) => {
+    const getValue = (key: string) =>
+      item.querySelector(key)?.textContent?.trim() || item.getAttribute(key) || ''
+
+    return {
+      translation_key: getValue('translation_key'),
+      source_text: getValue('source_text') || getValue('translated_text'),
+      category: getValue('category'),
+    }
+  })
+}
+
+const parseBatchFile = async (file: File) => {
+  batchError.value = ''
+  batchIsParsing.value = true
+
+  const text = await file.text()
+  const isXml = file.name.toLowerCase().endsWith('.xml') || text.trim().startsWith('<')
+
+  try {
+    let parsed: BatchRow[] = []
+
+    if (isXml) {
+      parsed = parseXml(text)
+      batchDelimiter.value = 'XML'
+    } else {
+      const delimiter = detectDelimiter(text)
+      batchDelimiter.value = delimiter === '\t' ? 'TAB' : delimiter
+      parsed = parseDelimitedText(text, delimiter)
+    }
+
+    batchRows.value = parsed.filter((row) => row.translation_key && row.source_text)
+
+    if (!batchRows.value.length) {
+      throw new Error('Subor neobsahuje platne riadky')
+    }
+  } catch (err) {
+    batchRows.value = []
+    batchError.value = err instanceof Error ? err.message : 'Nepodarilo sa nacitat subor'
+  } finally {
+    batchIsParsing.value = false
+  }
+}
+
+const handleBatchFileInput = async (event: Event) => {
+  const target = event.target as HTMLInputElement
+  const file = target.files?.[0]
+  if (!file) {
+    return
+  }
+  batchFileName.value = file.name
+  await parseBatchFile(file)
+}
+
+const submitBatch = async () => {
+  if (!batchRows.value.length) {
+    return
+  }
+  batchIsSending.value = true
+  batchError.value = ''
+
+  try {
+    const { data: sessionData } = await supabase.auth.getSession()
+    const token = sessionData.session?.access_token
+
+    const response = await fetch(`${import.meta.env.VITE_SUPABASE_URL}/functions/v1/rapid-task`, {
+      method: 'POST',
+      headers: {
+        'Content-Type': 'application/json',
+        ...(token ? { Authorization: `Bearer ${token}` } : {}),
+      },
+      body: JSON.stringify({ rows: batchRows.value }),
+    })
+
+    if (!response.ok) {
+      throw new Error('Edge funkcia vratila chybu')
+    }
+
+    showBatchModal.value = false
+    resetBatch()
+    await loadRows()
+  } catch (err) {
+    batchError.value = err instanceof Error ? err.message : 'Nepodarilo sa odoslat batch'
+  } finally {
+    batchIsSending.value = false
+  }
+}
+
 watch([visibleRows, perPage, nameFilter, categoryFilter, dateFrom, dateTo], () => {
   currentPage.value = 1
 })
@@ -430,7 +646,7 @@ onMounted(async () => {
           Zmenit jazyk
         </button>
         <button class="ghost" type="button" @click="loadRows">Obnovit</button>
-        <button class="primary" type="button" @click="openAddTranslation">Pridat preklad</button>
+        <button class="primary batch" type="button" @click="openBatchUpload">Importovať slová</button>
         <button class="ghost" type="button" @click="showLanguageModal = true">Pridat jazyk</button>
         <button
           v-if="selectedIds.length"
@@ -628,6 +844,69 @@ onMounted(async () => {
             @click="confirmLanguageSelection"
           >
             Pokracovat
+          </button>
+        </div>
+      </div>
+    </div>
+
+    <div v-if="showBatchModal" class="modal-backdrop" @click.self="showBatchModal = false">
+      <div class="modal modal-scroll">
+        <header>
+          <div>
+            <p class="modal-kicker">Batch import</p>
+            <h2>Import prekladov</h2>
+            <p class="modal-subtitle">
+              CSV/TSV/TXT alebo XML s polami translation_key, source_text (alebo translated_text),
+              category
+            </p>
+          </div>
+          <button class="icon" type="button" @click="showBatchModal = false">x</button>
+        </header>
+
+        <div class="batch-upload">
+          <input
+            type="file"
+            accept=".csv,.tsv,.txt,.xml"
+            @change="handleBatchFileInput"
+          />
+          <div class="batch-meta" v-if="batchFileName">
+            <span><strong>Subor:</strong> {{ batchFileName }}</span>
+            <span v-if="batchDelimiter"><strong>Delimiter:</strong> {{ batchDelimiter }}</span>
+            <span><strong>Riadkov:</strong> {{ batchRows.length }}</span>
+          </div>
+          <p v-if="batchIsParsing">Spracuvavam subor...</p>
+          <p v-if="batchError" class="error">{{ batchError }}</p>
+        </div>
+
+        <div v-if="batchRows.length" class="batch-preview">
+          <table class="data-table">
+            <thead>
+              <tr>
+                <th>translation_key</th>
+                <th>source_text</th>
+                <th>category</th>
+              </tr>
+            </thead>
+            <tbody>
+              <tr v-for="(row, index) in batchRows.slice(0, 10)" :key="index">
+                <td>{{ row.translation_key }}</td>
+                <td>{{ row.source_text }}</td>
+                <td>{{ row.category || '-' }}</td>
+              </tr>
+            </tbody>
+          </table>
+          <p class="batch-hint">Zobrazenych 10 z {{ batchRows.length }} riadkov.</p>
+        </div>
+
+        <div class="modal-actions">
+          <button class="ghost" type="button" @click="showBatchModal = false">Zatvorit</button>
+          <button
+            class="primary"
+            type="button"
+            :disabled="!batchRows.length || batchIsSending"
+            @click="submitBatch"
+          >
+            {{ batchIsSending ? 'Odosielam...' : 'Odoslat na edge funkciu' }}
           </button>
         </div>
       </div>
