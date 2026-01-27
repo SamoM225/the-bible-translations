@@ -36,7 +36,7 @@ const showLanguageModal = ref(false)
 const showTranslationModal = ref(false)
 const showLanguageSelectModal = ref(true)
 
-const selectedLanguageCode = ref('')
+const selectedLanguageCodes = ref<string[]>([])
 
 const perPagePreset = ref('25')
 const customPerPage = ref(25)
@@ -65,8 +65,20 @@ const categoryFilter = ref('all')
 const dateFrom = ref('')
 const dateTo = ref('')
 
-const selectedLanguage = computed(() => {
-  return languages.value.find((lang) => lang.code === selectedLanguageCode.value) || null
+const selectedLanguagesLabel = computed(() => {
+  if (!selectedLanguageCodes.value.length) {
+    return ''
+  }
+  if (selectedLanguageCodes.value.length === languages.value.length) {
+    return 'Vsetky jazyky'
+  }
+  return selectedLanguageCodes.value
+    .map((code) => languages.value.find((lang) => lang.code === code)?.name || code)
+    .join(', ')
+})
+
+const allLanguagesSelected = computed(() => {
+  return languages.value.length > 0 && selectedLanguageCodes.value.length === languages.value.length
 })
 
 const categories = computed(() => {
@@ -164,7 +176,7 @@ const allSelectedOnPage = computed(() => {
 })
 
 const loadRows = async () => {
-  if (!selectedLanguageCode.value) {
+  if (!selectedLanguageCodes.value.length) {
     rows.value = []
     return
   }
@@ -173,7 +185,7 @@ const loadRows = async () => {
   const { data, error } = await supabase
     .from(tableName)
     .select('*')
-    .eq('language_code', selectedLanguageCode.value)
+    .in('language_code', selectedLanguageCodes.value)
 
   if (error) {
     errorMessage.value = error.message
@@ -191,20 +203,30 @@ const loadLanguages = async () => {
     .select('code, name, is_active, percent_translated')
     .order('name')
   languages.value = data ?? []
-  if (!selectedLanguageCode.value && languages.value.length) {
-    selectedLanguageCode.value = languages.value[0].code
+  if (!selectedLanguageCodes.value.length && languages.value.length) {
+    selectedLanguageCodes.value = [languages.value[0]?.code || '']
   }
-  if (!translationForm.value.language_code && languages.value.length) {
+  if (!translationForm.value.language_code && languages.value.length && languages.value[0]) {
     translationForm.value.language_code = languages.value[0].code
   }
 }
 
+const toggleSelectAllLanguages = () => {
+  if (allLanguagesSelected.value) {
+    selectedLanguageCodes.value = []
+    return
+  }
+  selectedLanguageCodes.value = languages.value.map((lang) => lang.code)
+}
+
 const confirmLanguageSelection = async () => {
-  if (!selectedLanguageCode.value) {
+  if (!selectedLanguageCodes.value.length) {
     return
   }
   showLanguageSelectModal.value = false
-  translationForm.value.language_code = selectedLanguageCode.value
+  if (!selectedLanguageCodes.value.includes(translationForm.value.language_code)) {
+    translationForm.value.language_code = selectedLanguageCodes.value[0] || ''
+  }
   await loadRows()
 }
 
@@ -215,7 +237,7 @@ const resetLanguageForm = () => {
 const resetTranslationForm = () => {
   translationForm.value = {
     translation_key: '',
-    language_code: selectedLanguageCode.value || languages.value[0]?.code || '',
+    language_code: selectedLanguageCodes.value[0] || languages.value[0]?.code || '',
     translated_text: '',
     category: '',
   }
@@ -238,7 +260,7 @@ const openAddTranslation = () => {
 const openEditTranslation = (row: Row) => {
   translationForm.value = {
     translation_key: String(row.translation_key ?? ''),
-    language_code: String(row.language_code ?? selectedLanguageCode.value ?? ''),
+    language_code: String(row.language_code ?? selectedLanguageCodes.value[0] ?? ''),
     translated_text: String(row.translated_text ?? ''),
     category: String(row.category ?? ''),
   }
@@ -361,7 +383,7 @@ watch(totalPages, (pages) => {
   }
 })
 
-watch(selectedLanguageCode, () => {
+watch(selectedLanguageCodes, () => {
   selectedIds.value = []
   currentPage.value = 1
 })
@@ -379,7 +401,7 @@ onMounted(async () => {
         <h1>Dashboard</h1>
         <p class="dash-subtitle">
           Prehlad dat z tabulky <strong>{{ tableName }}</strong>
-          <span v-if="selectedLanguage">({{ selectedLanguage.name }})</span>.
+          <span v-if="selectedLanguagesLabel">({{ selectedLanguagesLabel }})</span>.
         </p>
       </div>
       <div class="dash-actions">
@@ -544,18 +566,24 @@ onMounted(async () => {
         <header>
           <div>
             <p class="modal-kicker">Languages</p>
-            <h2>Vyber jazyk</h2>
-            <p class="modal-subtitle">Vyber jazyk pre zobrazenie prekladov.</p>
+            <h2>Vyber jazyky</h2>
+            <p class="modal-subtitle">Mizes vybrat viacero alebo vsetky jazyky.</p>
           </div>
           <button class="icon" type="button" @click="showLanguageSelectModal = false">x</button>
         </header>
+        <div class="language-toolbar">
+          <label class="language-toggle">
+            <input type="checkbox" :checked="allLanguagesSelected" @change="toggleSelectAllLanguages" />
+            <span>Vybrat vsetky</span>
+          </label>
+          <button class="ghost" type="button" @click="selectedLanguageCodes = []">Vycistit</button>
+        </div>
         <div class="language-grid">
           <label v-for="lang in languages" :key="lang.code" class="language-card">
             <input
-              type="radio"
-              name="language"
+              type="checkbox"
               :value="lang.code"
-              v-model="selectedLanguageCode"
+              v-model="selectedLanguageCodes"
             />
             <div>
               <strong>{{ lang.name }}</strong>
@@ -573,7 +601,12 @@ onMounted(async () => {
           <button class="ghost" type="button" @click="showLanguageSelectModal = false">
             Zatvorit
           </button>
-          <button class="primary" type="button" @click="confirmLanguageSelection">
+          <button
+            class="primary"
+            type="button"
+            :disabled="!selectedLanguageCodes.length"
+            @click="confirmLanguageSelection"
+          >
             Pokracovat
           </button>
         </div>
