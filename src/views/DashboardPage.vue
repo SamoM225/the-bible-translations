@@ -240,7 +240,7 @@ const loadRows = async () => {
     const { data, error } = await supabase
       .from(tableName)
       .select('*')
-      .in('language_code', selectedLanguageCodes.value)
+      .in('language_code', selectedLanguageCodes.value || [])
       .range(fromIndex, toIndex)
 
     if (error) {
@@ -271,10 +271,10 @@ const loadLanguages = async () => {
     .order('name')
   languages.value = data ?? []
   if (!selectedLanguageCodes.value.length && languages.value.length) {
-    selectedLanguageCodes.value = [languages.value[0].code]
+    selectedLanguageCodes.value = [languages.value[0]?.code || '']
   }
   if (!translationForm.value.language_code && languages.value.length) {
-    translationForm.value.language_code = languages.value[0].code
+    translationForm.value.language_code = languages.value[0]?.code || ''
   }
 }
 
@@ -292,7 +292,7 @@ const confirmLanguageSelection = async () => {
   }
   showLanguageSelectModal.value = false
   if (!selectedLanguageCodes.value.includes(translationForm.value.language_code)) {
-    translationForm.value.language_code = selectedLanguageCodes.value[0]
+    translationForm.value.language_code = (selectedLanguageCodes.value[0] || '') as string
   }
   await loadRows()
 }
@@ -309,7 +309,7 @@ const showNotification = (message: string, type: 'success' | 'error' = 'success'
 const resetTranslationForm = () => {
   translationForm.value = {
     translation_key: '',
-    language_code: selectedLanguageCodes.value[0] || languages.value[0]?.code || '',
+    language_code: (selectedLanguageCodes.value?.[0] || languages.value[0]?.code || '') as string,
     translated_text: '',
     category: '',
   }
@@ -373,8 +373,8 @@ const addLanguage = async () => {
   errorMessage.value = ''
   isAddingLanguage.value = true
   const payload = {
-    code: languageForm.value.code.trim(),
-    name: languageForm.value.name.trim(),
+    code: (languageForm.value.code ?? '').trim(),
+    name: (languageForm.value.name ?? '').trim(),
     is_active: languageForm.value.is_active,
   }
 
@@ -494,10 +494,10 @@ const savePrompt = async () => {
 const addTranslation = async () => {
   errorMessage.value = ''
   const payload = {
-    translation_key: translationForm.value.translation_key.trim(),
-    language_code: translationForm.value.language_code,
-    translated_text: translationForm.value.translated_text.trim(),
-    category: translationForm.value.category.trim() || null,
+    translation_key: (translationForm.value.translation_key ?? '').trim(),
+    language_code: translationForm.value.language_code || '',
+    translated_text: (translationForm.value.translated_text ?? '').trim(),
+    category: (translationForm.value.category ?? '').trim() || null,
   }
 
   const { error } = await supabase.from('translations').insert(payload)
@@ -517,10 +517,10 @@ const updateTranslation = async () => {
   }
   errorMessage.value = ''
   const payload = {
-    translation_key: translationForm.value.translation_key.trim(),
-    language_code: translationForm.value.language_code,
-    translated_text: translationForm.value.translated_text.trim(),
-    category: translationForm.value.category.trim() || null,
+    translation_key: (translationForm.value.translation_key ?? '').trim(),
+    language_code: translationForm.value.language_code || '',
+    translated_text: (translationForm.value.translated_text ?? '').trim(),
+    category: (translationForm.value.category ?? '').trim() || null,
   }
 
   const { error } = await supabase.from('translations').update(payload).eq('id', editingId.value)
@@ -633,13 +633,13 @@ const parseDelimitedText = (text: string, delimiter: string) => {
     return [] as BatchRow[]
   }
 
-  const headerLine = lines[0].replace(/^\uFEFF/, '')
+  const headerLine = (lines[0] ?? '').replace(/^\uFEFF/, '')
   let header = parseCsvLine(headerLine, delimiter).map((item) => item.trim().toLowerCase())
   
   // If header has only one item and it contains the delimiter, it might be a malformed CSV
   // Try re-parsing the header without treating it as a CSV line
-  if (header.length === 1 && header[0].includes(delimiter)) {
-    header = header[0].split(delimiter).map((item) => item.trim().toLowerCase())
+  if (header.length === 1 && (header[0]?.includes(delimiter) ?? false)) {
+    header = (header[0] ?? '').split(delimiter).map((item) => item.trim().toLowerCase())
   }
   
   // Find translation_key column
