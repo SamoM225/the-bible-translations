@@ -1,6 +1,6 @@
 <script setup lang="ts">
 import { computed, onMounted, ref, watch } from 'vue'
-import { supabase } from '../main'
+import { supabase } from '../lib/supabase'
 
 type Row = {
   id: string
@@ -25,9 +25,28 @@ type BatchRow = {
   category?: string
 }
 
-const loggedIn = supabase.auth.getUser().then(({ data: { user } }) => user)
-if (!loggedIn) {
-  window.location.href = '/login'
+type BatchReportItem = {
+  lang: string
+  key: string
+  en: string
+  target: string
+  reason: string
+  type: string
+}
+
+type BatchReport = {
+  processed: string[]
+  warnings: string[]
+  review_items: BatchReportItem[]
+}
+
+type LanguageEdgeResponse = {
+  success: boolean
+  finished: boolean
+  next_offset?: number | null
+  report?: {
+    review_items?: BatchReportItem[]
+  }
 }
 
 const tableName = 'translations'
@@ -42,6 +61,7 @@ const showLanguageModal = ref(false)
 const showTranslationModal = ref(false)
 const showLanguageSelectModal = ref(true)
 const showBatchModal = ref(false)
+const showPromptsModal = ref(false)
 
 const selectedLanguageCodes = ref<string[]>([])
 
@@ -78,6 +98,17 @@ const batchRows = ref<BatchRow[]>([])
 const batchError = ref('')
 const batchIsParsing = ref(false)
 const batchIsSending = ref(false)
+const batchReport = ref<BatchReport | null>(null)
+const isAddingLanguage = ref(false)
+const notifyMessage = ref('')
+const notifyType = ref<'success' | 'error'>('success')
+const prompts = ref<Array<{ name: string; prompt: string }>>([])
+const promptsLoading = ref(false)
+const promptsSaving = ref(false)
+const promptsError = ref('')
+const selectedPromptName = ref('')
+const newPromptName = ref('')
+const promptText = ref('')
 
 const selectedLanguagesLabel = computed(() => {
   if (!selectedLanguageCodes.value.length) {
@@ -94,6 +125,8 @@ const selectedLanguagesLabel = computed(() => {
 const allLanguagesSelected = computed(() => {
   return languages.value.length > 0 && selectedLanguageCodes.value.length === languages.value.length
 })
+
+const promptNames = computed(() => prompts.value.map((item) => item.name))
 
 const categories = computed(() => {
   const unique = new Set<string>()
@@ -268,6 +301,11 @@ const resetLanguageForm = () => {
   languageForm.value = { code: '', name: '', is_active: true }
 }
 
+const showNotification = (message: string, type: 'success' | 'error' = 'success') => {
+  notifyMessage.value = message
+  notifyType.value = type
+}
+
 const resetTranslationForm = () => {
   translationForm.value = {
     translation_key: '',
@@ -292,6 +330,15 @@ const resetBatch = () => {
   batchRows.value = []
   batchError.value = ''
   batchIsParsing.value = false
+  batchIsSending.value = false
+  batchReport.value = null
+}
+
+const resetPromptForm = () => {
+  selectedPromptName.value = ''
+  newPromptName.value = ''
+  promptText.value = ''
+  promptsError.value = ''
 }
 
 const openAddTranslation = () => {
@@ -302,6 +349,12 @@ const openAddTranslation = () => {
 const openBatchUpload = () => {
   resetBatch()
   showBatchModal.value = true
+}
+
+const openPromptsModal = async () => {
+  resetPromptForm()
+  showPromptsModal.value = true
+  await loadPrompts()
 }
 
 const openEditTranslation = (row: Row) => {
@@ -318,41 +371,124 @@ const openEditTranslation = (row: Row) => {
 
 const addLanguage = async () => {
   errorMessage.value = ''
+  isAddingLanguage.value = true
   const payload = {
     code: languageForm.value.code.trim(),
     name: languageForm.value.name.trim(),
     is_active: languageForm.value.is_active,
   }
 
-  const { error } = await supabase.from('languages').insert(payload)
+  const { error } = await supabase.from('languages').upsert(payload, { onConflict: 'code' })
   if (error) {
     errorMessage.value = error.message
+    isAddingLanguage.value = false
     return
   }
 
-  try {
+const callEdge = async (offset: number) => {
     const { data: sessionData } = await supabase.auth.getSession()
     const token = sessionData.session?.access_token
 
-    const response = await fetch(`${import.meta.env.VITE_SUPABASE_URL}/functions/v1/add-language-translation`, {
-      method: 'POST',
-      headers: {
-        'Content-Type': 'application/json',
-        ...(token ? { Authorization: `Bearer ${token}` } : {}),
-      },
-      body: JSON.stringify({ target_language: payload.code }),
-    })
+    const response = await fetch(
+      `${import.meta.env.VITE_SUPABASE_URL}/functions/v1/add-language-translation`,
+      {
+        method: 'POST',
+        headers: {
+          'Content-Type': 'application/json',
+          ...(token ? { Authorization: `Bearer ${token}` } : {}),
+        },
+        body: JSON.stringify({ target_language: payload.code, offset }),
+      }
+    )
 
-    if (!response.ok) {
-      errorMessage.value = 'Nepodarilo sa spustit edge funkciu pre preklady.'
+    const responseBody = (await response.json().catch(() => null)) as LanguageEdgeResponse | null
+    if (!response.ok || responseBody?.success === false) {
+      throw new Error('Nepodarilo sa spustit edge funkciu pre preklady.')
     }
-  } catch {
-    errorMessage.value = 'Nepodarilo sa spustit edge funkciu pre preklady.'
+    return responseBody
   }
+
+  const reviewItems: BatchReportItem[] = []
+
+  const processBatch = async (offset: number) => {
+    try {
+      const responseBody = await callEdge(offset)
+
+      if (responseBody?.report?.review_items?.length) {
+        reviewItems.push(...responseBody.report.review_items)
+      }
+
+      if (responseBody?.finished) {
+        showNotification('Jazyk uspesne pridany a prelozeny.', 'success')
+        isAddingLanguage.value = false
+        return
+      }
+
+      const nextOffset =
+        typeof responseBody?.next_offset === 'number' ? responseBody.next_offset : null
+
+      if (nextOffset === null || Number.isNaN(nextOffset)) {
+        showNotification('Jazyk uspesne pridany a prelozeny.', 'success')
+        isAddingLanguage.value = false
+        return
+      }
+
+      await processBatch(nextOffset)
+    } catch (err) {
+      errorMessage.value =
+        err instanceof Error ? err.message : 'Nepodarilo sa spustit edge funkciu pre preklady.'
+      showNotification('Preklad zlyhal. Skusim znovu o 30s.', 'error')
+      window.setTimeout(() => {
+        void processBatch(offset)
+      }, 30000)
+    }
+  }
+
+  await processBatch(0)
 
   await loadLanguages()
   resetLanguageForm()
   showLanguageModal.value = false
+}
+
+const loadPrompts = async () => {
+  promptsLoading.value = true
+  promptsError.value = ''
+  const { data, error } = await supabase.from('prompts').select('name, prompt').order('name')
+  if (error) {
+    promptsError.value = error.message
+    prompts.value = []
+  } else {
+    prompts.value = data ?? []
+  }
+  promptsLoading.value = false
+}
+
+const savePrompt = async () => {
+  promptsError.value = ''
+  promptsSaving.value = true
+  const name = selectedPromptName.value === '__new__' ? newPromptName.value.trim() : selectedPromptName.value
+  if (!name || !promptText.value.trim()) {
+    promptsError.value = 'Vyplnte nazov a text promptu.'
+    promptsSaving.value = false
+    return
+  }
+
+  const { error } = await supabase.from('prompts').upsert(
+    { name, prompt: promptText.value.trim() },
+    { onConflict: 'name' }
+  )
+
+  if (error) {
+    promptsError.value = error.message
+    promptsSaving.value = false
+    return
+  }
+
+  await loadPrompts()
+  selectedPromptName.value = name
+  newPromptName.value = ''
+  promptsSaving.value = false
 }
 
 const addTranslation = async () => {
@@ -601,6 +737,7 @@ const submitBatch = async () => {
   }
   batchIsSending.value = true
   batchError.value = ''
+  batchReport.value = null
 
   try {
     const { data: sessionData } = await supabase.auth.getSession()
@@ -615,18 +752,62 @@ const submitBatch = async () => {
       body: JSON.stringify({ rows: batchRows.value }),
     })
 
+    const payload = await response.json().catch(() => null)
     if (!response.ok) {
-      throw new Error('Edge funkcia vratila chybu')
+      const message = payload?.error || 'Edge funkcia vratila chybu'
+      throw new Error(message)
     }
 
-    showBatchModal.value = false
-    resetBatch()
+    batchReport.value = payload?.report ?? null
     await loadRows()
   } catch (err) {
     batchError.value = err instanceof Error ? err.message : 'Nepodarilo sa odoslat batch'
   } finally {
     batchIsSending.value = false
   }
+}
+
+const exportCsv = (filename: string, header: string[], rows: string[][]) => {
+  const lines = rows.map((row) =>
+    row.map((value) => `"${String(value).replace(/"/g, '""')}"`).join(',')
+  )
+  const csv = [header.join(','), ...lines].join('\n')
+  const blob = new Blob([csv], { type: 'text/csv;charset=utf-8' })
+  const url = URL.createObjectURL(blob)
+  const link = document.createElement('a')
+  link.href = url
+  link.download = filename
+  link.click()
+  URL.revokeObjectURL(url)
+}
+
+const exportBatchReview = () => {
+  if (!batchReport.value?.review_items?.length) {
+    return
+  }
+  const header = ['lang', 'key', 'en', 'target', 'reason', 'type']
+  const rows = batchReport.value.review_items.map((item) => [
+    item.lang,
+    item.key,
+    item.en,
+    item.target,
+    item.reason,
+    item.type,
+  ])
+  exportCsv('batch-review-items.csv', header, rows)
+}
+
+const exportBatchAll = () => {
+  if (!batchRows.value.length) {
+    return
+  }
+  const header = ['translation_key', 'source_text', 'category']
+  const rows = batchRows.value.map((row) => [
+    row.translation_key,
+    row.source_text,
+    row.category ?? '',
+  ])
+  exportCsv('batch-import.csv', header, rows)
 }
 
 watch([visibleRows, perPage, nameFilter, categoryFilter, dateFrom, dateTo], () => {
@@ -642,6 +823,16 @@ watch(totalPages, (pages) => {
 watch(selectedLanguageCodes, () => {
   selectedIds.value = []
   currentPage.value = 1
+})
+
+watch(selectedPromptName, () => {
+  if (selectedPromptName.value === '__new__') {
+    promptText.value = ''
+    newPromptName.value = ''
+    return
+  }
+  const found = prompts.value.find((item) => item.name === selectedPromptName.value)
+  promptText.value = found?.prompt ?? ''
 })
 
 onMounted(async () => {
@@ -666,7 +857,8 @@ onMounted(async () => {
           Zmenit jazyk
         </button>
         <button class="ghost" type="button" @click="loadRows">Obnovit</button>
-        <button class="primary batch" type="button" @click="openBatchUpload">Importovať slová</button>
+        <button class="primary batch" type="button" @click="openBatchUpload">Importovat slova</button>
+        <button class="ghost" type="button" @click="openPromptsModal">Upravit prompty</button>
         <button class="ghost" type="button" @click="showLanguageModal = true">Pridat jazyk</button>
         <button
           v-if="selectedIds.length"
@@ -760,7 +952,7 @@ onMounted(async () => {
           <span>Datum do</span>
           <input v-model="dateTo" type="date" />
         </label>
-        <button class="ghost" type="button" @click="resetFilters">Vymazat filtre</button>
+        <button class="ghost" type="button" @click="resetFilters">Vymazať filtre</button>
       </div>
 
       <div class="table-wrap">
@@ -882,40 +1074,76 @@ onMounted(async () => {
           </div>
           <button class="icon" type="button" @click="showBatchModal = false">x</button>
         </header>
-
-        <div class="batch-upload">
-          <input
-            type="file"
-            accept=".csv,.tsv,.txt,.xml"
-            @change="handleBatchFileInput"
-          />
-          <div class="batch-meta" v-if="batchFileName">
-            <span><strong>Subor:</strong> {{ batchFileName }}</span>
-            <span v-if="batchDelimiter"><strong>Delimiter:</strong> {{ batchDelimiter }}</span>
-            <span><strong>Riadkov:</strong> {{ batchRows.length }}</span>
+        <div class="batch-scroll">
+          <div class="batch-upload">
+            <input
+              type="file"
+              accept=".csv,.tsv,.txt,.xml"
+              @change="handleBatchFileInput"
+            />
+            <div class="batch-meta" v-if="batchFileName">
+              <span><strong>Subor:</strong> {{ batchFileName }}</span>
+              <span v-if="batchDelimiter"><strong>Delimiter:</strong> {{ batchDelimiter }}</span>
+              <span><strong>Riadkov:</strong> {{ batchRows.length }}</span>
+            </div>
+            <p v-if="batchIsParsing">Spracuvavam subor...</p>
+            <p v-if="batchError" class="error">{{ batchError }}</p>
           </div>
-          <p v-if="batchIsParsing">Spracuvavam subor...</p>
-          <p v-if="batchError" class="error">{{ batchError }}</p>
-        </div>
 
-        <div v-if="batchRows.length" class="batch-preview">
-          <table class="data-table">
-            <thead>
-              <tr>
-                <th>translation_key</th>
-                <th>source_text</th>
-                <th>category</th>
-              </tr>
-            </thead>
-            <tbody>
-              <tr v-for="(row, index) in batchRows.slice(0, 10)" :key="index">
-                <td>{{ row.translation_key }}</td>
-                <td>{{ row.source_text }}</td>
-                <td>{{ row.category || '-' }}</td>
-              </tr>
-            </tbody>
-          </table>
-          <p class="batch-hint">Zobrazenych 10 z {{ batchRows.length }} riadkov.</p>
+          <div v-if="batchRows.length" class="batch-preview">
+            <div class="batch-table-wrap">
+              <table class="data-table">
+                <thead>
+                  <tr>
+                    <th>translation_key</th>
+                    <th>source_text</th>
+                    <th>category</th>
+                  </tr>
+                </thead>
+                <tbody>
+                  <tr v-for="(row, index) in batchRows.slice(0, 10)" :key="index">
+                    <td>{{ row.translation_key }}</td>
+                    <td>{{ row.source_text }}</td>
+                    <td>{{ row.category || '-' }}</td>
+                  </tr>
+                </tbody>
+              </table>
+            </div>
+            <p class="batch-hint">Zobrazenych 10 z {{ batchRows.length }} riadkov.</p>
+          </div>
+
+          <div v-if="batchIsSending" class="batch-loading">
+            <svg class="spinner-icon" viewBox="0 0 50 50" role="img" aria-label="Loading">
+              <circle class="spinner-track" cx="25" cy="25" r="20" fill="none" stroke-width="4" />
+              <circle class="spinner-head" cx="25" cy="25" r="20" fill="none" stroke-width="4" />
+            </svg>
+            <p>Pockajte kym sa data spracuju</p>
+            <div class="skeleton">
+              <div class="skeleton-bar"></div>
+              <div class="skeleton-bar"></div>
+              <div class="skeleton-bar"></div>
+            </div>
+          </div>
+
+          <div v-if="batchReport" class="batch-report">
+            <h3>Batch Report</h3>
+            <div v-if="batchReport.review_items?.length" class="batch-report-section">
+              <h4>Polozky na kontrolu ({{ batchReport.review_items.length }})</h4>
+              <div class="batch-report-buttons">
+                <button class="ghost" type="button" @click="exportBatchReview">Export review items</button>
+              </div>
+            </div>
+            <div v-if="batchReport.warnings?.length" class="batch-report-section">
+              <h4>Varovania ({{ batchReport.warnings.length }})</h4>
+              <ul>
+                <li v-for="(warning, index) in batchReport.warnings" :key="index">{{ warning }}</li>
+              </ul>
+            </div>
+            <div v-if="batchReport.processed?.length" class="batch-report-section">
+              <h4>Spracovane prvky ({{ batchReport.processed.length }})</h4>
+              <p>{{ batchReport.processed.length }} riadkov bolo uspesne spracovanych.</p>
+            </div>
+          </div>
         </div>
 
         <div class="modal-actions">
@@ -926,11 +1154,58 @@ onMounted(async () => {
             :disabled="!batchRows.length || batchIsSending"
             @click="submitBatch"
           >
-            {{ batchIsSending ? 'Odosielam...' : 'Odoslat na edge funkciu' }}
+            {{ batchIsSending ? 'Odosielam...' : 'Importovat' }}
           </button>
+          <button class="ghost" type="button" @click="exportBatchAll">Export all</button>
         </div>
       </div>
     </div>
+
+    <div v-if="showPromptsModal" class="modal-backdrop" @click.self="showPromptsModal = false">
+  <div class="modal modal-scroll">
+    <header>
+      <div>
+        <p class="modal-kicker">Prompts</p>
+        <h2>Uprava promptov</h2>
+        <p class="modal-subtitle">Vyber prompt podla nazvu a uprav jeho text.</p>
+      </div>
+      <button class="icon" type="button" @click="showPromptsModal = false">x</button>
+    </header>
+
+    <div class="batch-scroll">
+      <div class="prompt-form">
+        <label>
+          <span>Nazov</span>
+          <select v-model="selectedPromptName">
+            <option value="">Vyber prompt</option>
+            <option v-for="name in promptNames" :key="name" :value="name">{{ name }}</option>
+            <option value="__new__">+ Novy prompt</option>
+          </select>
+        </label>
+
+        <label v-if="selectedPromptName === '__new__'">
+          <span>Novy nazov</span>
+          <input v-model="newPromptName" placeholder="napr. summary_prompt" />
+        </label>
+
+        <label>
+          <span>Prompt text</span>
+          <textarea v-model="promptText" rows="15" placeholder="Sem vloz prompt..."></textarea>
+        </label>
+
+        <p v-if="promptsLoading">Nacitavam prompty...</p>
+        <p v-if="promptsError" class="error">{{ promptsError }}</p>
+      </div>
+    </div>
+
+    <div class="modal-actions">
+      <button class="ghost" type="button" @click="showPromptsModal = false">Zatvorit</button>
+      <button class="primary" type="button" :disabled="promptsSaving" @click="savePrompt">
+        {{ promptsSaving ? 'Ukladam...' : 'Ulozit' }}
+      </button>
+    </div>
+  </div>
+</div>
 
     <div v-if="showTranslationModal" class="modal-backdrop">
       <div class="modal">
@@ -1001,11 +1276,28 @@ onMounted(async () => {
             <button class="ghost" type="button" @click="showLanguageModal = false">
               Zrusit
             </button>
-            <button class="primary" type="submit">Ulozit</button>
+            <button class="primary" type="submit" :disabled="isAddingLanguage">
+              {{ isAddingLanguage ? 'Pridavam...' : 'Ulozit' }}
+            </button>
           </div>
         </form>
+      </div>
+    </div>
+    <div v-if="notifyMessage" class="notify-backdrop" @click.self="notifyMessage = ''">
+      <div class="notify-card" :class="notifyType">
+        <h3>{{ notifyType === 'success' ? 'Hotovo' : 'Upozornenie' }}</h3>
+        <p>{{ notifyMessage }}</p>
+        <button class="primary" type="button" @click="notifyMessage = ''">Zatvorit</button>
       </div>
     </div>
   </div>
 </template>
 <style src="../assets/dashboard.css"></style>
+
+
+
+
+
+
+
+
