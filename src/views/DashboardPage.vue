@@ -474,10 +474,30 @@ const savePrompt = async () => {
     return
   }
 
-  const { error } = await supabase.from('prompts').upsert(
-    { name, prompt: promptText.value.trim() },
-    { onConflict: 'name' }
-  )
+  // Check if prompt with this name already exists
+  const { data: existingPrompt, error: checkError } = await supabase
+    .from('prompts')
+    .select('name')
+    .eq('name', name)
+    .single()
+
+  if (checkError && checkError.code !== 'PGRST116') {
+    // PGRST116 means no rows found, which is expected for new prompts
+    promptsError.value = checkError.message
+    promptsSaving.value = false
+    return
+  }
+
+  let error
+  if (existingPrompt) {
+    // Update existing prompt
+    const result = await supabase.from('prompts').update({ prompt: promptText.value.trim() }).eq('name', name)
+    error = result.error
+  } else {
+    // Insert new prompt
+    const result = await supabase.from('prompts').insert({ name, prompt: promptText.value.trim() })
+    error = result.error
+  }
 
   if (error) {
     promptsError.value = error.message
