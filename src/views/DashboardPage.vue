@@ -109,6 +109,7 @@ const promptsError = ref('')
 const selectedPromptName = ref('')
 const newPromptName = ref('')
 const promptText = ref('')
+const isWipingAll = ref(false)
 
 const selectedLanguagesLabel = computed(() => {
   if (!selectedLanguageCodes.value.length) {
@@ -449,6 +450,47 @@ const callEdge = async (offset: number) => {
   await loadLanguages()
   resetLanguageForm()
   showLanguageModal.value = false
+}
+
+const wipeAllData = async () => {
+  const first = window.confirm(
+    'Naozaj chcete vymazat VSETKY data?.'
+  )
+  if (!first) {
+    return
+  }
+  const second = window.confirm('Potvrdte ESTE RAZ. Tato akcia je nevratna.')
+  if (!second) {
+    return
+  }
+
+  isWipingAll.value = true
+  errorMessage.value = ''
+
+  const { error: translationError } = await supabase
+    .from('translations')
+    .delete()
+    .not('id', 'is', null)
+
+  if (translationError) {
+    errorMessage.value = translationError.message
+    showNotification('Zlyhalo mazanie translations.', 'error')
+    isWipingAll.value = false
+    return
+  }
+
+  const { error: languageError } = await supabase.from('languages').delete().neq('code', 'en')
+  if (languageError) {
+    errorMessage.value = languageError.message
+    showNotification('Zlyhalo mazanie languages.', 'error')
+    isWipingAll.value = false
+    return
+  }
+
+  selectedIds.value = []
+  await Promise.all([loadLanguages(), loadRows()])
+  showNotification('Vsetky data boli vymazane, zostala iba anglictina.', 'success')
+  isWipingAll.value = false
 }
 
 const loadPrompts = async () => {
@@ -830,6 +872,15 @@ const exportBatchAll = () => {
   exportCsv('batch-import.csv', header, rows)
 }
 
+const exportBatchTemplate = () => {
+  const header = ['translation_key', 'source_text', 'category']
+  const rows = [
+    ['home.title', 'Home', 'ui'],
+    ['card.driver', 'Driver', ''],
+  ]
+  exportCsv('batch-template.csv', header, rows)
+}
+
 watch([visibleRows, perPage, nameFilter, categoryFilter, dateFrom, dateTo], () => {
   currentPage.value = 1
 })
@@ -879,6 +930,9 @@ onMounted(async () => {
         <button class="ghost" type="button" @click="loadRows">Obnovit</button>
         <button class="primary batch" type="button" @click="openBatchUpload">Importovat slova</button>
         <button class="ghost" type="button" @click="openPromptsModal">Upravit prompty</button>
+        <button class="ghost danger" type="button" :disabled="isWipingAll" @click="wipeAllData">
+          {{ isWipingAll ? 'Mazem...' : 'Vymazat vsetko' }}
+        </button>
         <button class="ghost" type="button" @click="showLanguageModal = true">Pridat jazyk</button>
         <button
           v-if="selectedIds.length"
@@ -1101,6 +1155,9 @@ onMounted(async () => {
               accept=".csv,.tsv,.txt,.xml"
               @change="handleBatchFileInput"
             />
+            <button class="ghost" type="button" @click="exportBatchTemplate">
+              Stiahnut CSV template
+            </button>
             <div class="batch-meta" v-if="batchFileName">
               <span><strong>Subor:</strong> {{ batchFileName }}</span>
               <span v-if="batchDelimiter"><strong>Delimiter:</strong> {{ batchDelimiter }}</span>
@@ -1313,10 +1370,6 @@ onMounted(async () => {
   </div>
 </template>
 <style src="../assets/dashboard.css"></style>
-
-
-
-
 
 
 

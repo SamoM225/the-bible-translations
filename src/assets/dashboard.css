@@ -510,6 +510,7 @@
   padding: 12px;
   border-radius: 14px;
   background: #f8fafc;
+  align-items: end;
 }
 
 .filter-bar label {
