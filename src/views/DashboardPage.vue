@@ -104,9 +104,6 @@ const translationForm = ref<{
 })
 
 const nameFilter = ref('')
-const categoryFilter = ref('all')
-const dateFrom = ref('')
-const dateTo = ref('')
 
 const batchFileName = ref('')
 const batchDelimiter = ref('')
@@ -144,6 +141,18 @@ const allLanguagesSelected = computed(() => {
 })
 
 const promptNames = computed(() => prompts.value.map((item) => item.name))
+
+const languageLabelMap = computed(() => {
+  const map = new Map<string, string>()
+  languages.value.forEach((lang) => {
+    map.set(lang.code, `${lang.name} (${lang.code})`)
+  })
+  return map
+})
+
+const getLanguageLabel = (code: string) => {
+  return languageLabelMap.value.get(code) ?? code
+}
 
 const tableRows = computed<PivotRow[]>(() => {
   const grouped = new Map<string, PivotRow>()
@@ -192,17 +201,6 @@ const tableRows = computed<PivotRow[]>(() => {
   )
 })
 
-const categories = computed(() => {
-  const unique = new Set<string>()
-  tableRows.value.forEach((row) => {
-    const value = String(row.category ?? '').trim()
-    if (value) {
-      unique.add(value)
-    }
-  })
-  return Array.from(unique).sort((a, b) => a.localeCompare(b))
-})
-
 const visibleRows = computed(() => {
   if (!search.value.trim()) {
     return tableRows.value
@@ -226,39 +224,12 @@ const visibleRows = computed(() => {
 
 const filteredRows = computed(() => {
   const nameQuery = nameFilter.value.trim().toLowerCase()
-  const categoryQuery = categoryFilter.value
-  const from = dateFrom.value ? new Date(dateFrom.value) : null
-  const to = dateTo.value ? new Date(dateTo.value) : null
 
   return visibleRows.value.filter((row) => {
     if (nameQuery) {
       const key = String(row.translation_key ?? '').toLowerCase()
       if (!key.includes(nameQuery)) {
         return false
-      }
-    }
-
-    if (categoryQuery !== 'all') {
-      const categoryValue = String(row.category ?? '')
-      if (categoryValue !== categoryQuery) {
-        return false
-      }
-    }
-
-    if (from || to) {
-      if (!row.last_updated) {
-        return false
-      }
-      const rowDate = new Date(row.last_updated)
-      if (from && rowDate < from) {
-        return false
-      }
-      if (to) {
-        const end = new Date(to)
-        end.setHours(23, 59, 59, 999)
-        if (rowDate > end) {
-          return false
-        }
       }
     }
 
@@ -413,9 +384,6 @@ const resetTranslationForm = () => {
 
 const resetFilters = () => {
   nameFilter.value = ''
-  categoryFilter.value = 'all'
-  dateFrom.value = ''
-  dateTo.value = ''
 }
 
 const resetBatch = () => {
@@ -478,7 +446,7 @@ const addLanguage = async () => {
     return
   }
 
-const callEdge = async (offset: number) => {
+  const callEdge = async (offset: number) => {
     const { data: sessionData } = await supabase.auth.getSession()
     const token = sessionData.session?.access_token
 
@@ -837,13 +805,13 @@ const parseDelimitedText = (text: string, delimiter: string) => {
 
   const headerLine = (lines[0] ?? '').replace(/^\uFEFF/, '')
   let header = parseCsvLine(headerLine, delimiter).map((item) => item.trim().toLowerCase())
-  
+
   // If header has only one item and it contains the delimiter, it might be a malformed CSV
   // Try re-parsing the header without treating it as a CSV line
   if (header.length === 1 && (header[0]?.includes(delimiter) ?? false)) {
     header = (header[0] ?? '').split(delimiter).map((item) => item.trim().toLowerCase())
   }
-  
+
   // Find translation_key column
   const translationKeyIndex = header.indexOf('translation_key')
   // Find source_text or translated_text column
@@ -1021,7 +989,7 @@ const exportBatchTemplate = () => {
   exportCsv('batch-template.csv', header, rows)
 }
 
-watch([visibleRows, perPage, nameFilter, categoryFilter, dateFrom, dateTo], () => {
+watch([visibleRows, perPage, nameFilter], () => {
   currentPage.value = 1
 })
 
@@ -1079,12 +1047,7 @@ onMounted(async () => {
           {{ isWipingAll ? 'Mazem...' : 'Vymazat vsetko' }}
         </button>
         <button class="ghost" type="button" @click="showLanguageModal = true">Pridat jazyk</button>
-        <button
-          v-if="selectedKeys.length"
-          class="ghost danger"
-          type="button"
-          @click="removeTranslations(selectedKeys)"
-        >
+        <button v-if="selectedKeys.length" class="ghost danger" type="button" @click="removeTranslations(selectedKeys)">
           Vymazat vybrane ({{ selectedKeys.length }})
         </button>
       </div>
@@ -1108,42 +1071,21 @@ onMounted(async () => {
               <option value="custom">Custom</option>
             </select>
           </label>
-          <input
-            v-if="perPagePreset === 'custom'"
-            v-model.number="customPerPage"
-            type="number"
-            min="1"
-            max="200"
-            placeholder="napr. 50"
-          />
+          <input v-if="perPagePreset === 'custom'" v-model.number="customPerPage" type="number" min="1" max="200"
+            placeholder="napr. 50" />
         </div>
         <div class="pager">
           <button class="ghost" type="button" :disabled="currentPage === 1" @click="goToPage(1)">
             Prva
           </button>
-          <button
-            class="ghost"
-            type="button"
-            :disabled="currentPage === 1"
-            @click="goToPage(currentPage - 1)"
-          >
+          <button class="ghost" type="button" :disabled="currentPage === 1" @click="goToPage(currentPage - 1)">
             Predchadzajuca
           </button>
           <span>Strana {{ currentPage }} / {{ totalPages }}</span>
-          <button
-            class="ghost"
-            type="button"
-            :disabled="currentPage === totalPages"
-            @click="goToPage(currentPage + 1)"
-          >
+          <button class="ghost" type="button" :disabled="currentPage === totalPages" @click="goToPage(currentPage + 1)">
             Dalsia
           </button>
-          <button
-            class="ghost"
-            type="button"
-            :disabled="currentPage === totalPages"
-            @click="goToPage(totalPages)"
-          >
+          <button class="ghost" type="button" :disabled="currentPage === totalPages" @click="goToPage(totalPages)">
             Posledna
           </button>
         </div>
@@ -1154,23 +1096,6 @@ onMounted(async () => {
           <span>Nazov (key)</span>
           <input v-model="nameFilter" type="search" placeholder="napr. home.title" />
         </label>
-        <label>
-          <span>Kategoria</span>
-          <select v-model="categoryFilter">
-            <option value="all">Vsetky</option>
-            <option v-for="category in categories" :key="category" :value="category">
-              {{ category }}
-            </option>
-          </select>
-        </label>
-        <label>
-          <span>Datum od</span>
-          <input v-model="dateFrom" type="date" />
-        </label>
-        <label>
-          <span>Datum do</span>
-          <input v-model="dateTo" type="date" />
-        </label>
         <button class="ghost" type="button" @click="resetFilters">Vymazať filtre</button>
       </div>
 
@@ -1179,12 +1104,8 @@ onMounted(async () => {
           <thead>
             <tr>
               <th class="select-col">
-                <input
-                  type="checkbox"
-                  :checked="allSelectedOnPage"
-                  @change="toggleSelectAllOnPage"
-                  aria-label="Select all"
-                />
+                <input type="checkbox" :checked="allSelectedOnPage" @change="toggleSelectAllOnPage"
+                  aria-label="Select all" />
               </th>
               <th v-for="column in columns" :key="column.key">{{ column.label }}</th>
               <th class="actions-col"></th>
@@ -1193,12 +1114,8 @@ onMounted(async () => {
           <tbody>
             <tr v-for="row in paginatedRows" :key="row.translation_key" class="data-row">
               <td class="select-col">
-                <input
-                  type="checkbox"
-                  :checked="selectedKeys.includes(row.translation_key)"
-                  @change="toggleSelectRow(row.translation_key)"
-                  aria-label="Select row"
-                />
+                <input type="checkbox" :checked="selectedKeys.includes(row.translation_key)"
+                  @change="toggleSelectRow(row.translation_key)" aria-label="Select row" />
               </td>
               <td v-for="column in columns" :key="column.key">
                 <span v-if="column.key === 'translation_key'">{{ row.translation_key }}</span>
@@ -1209,11 +1126,7 @@ onMounted(async () => {
                   <button class="ghost" type="button" @click="openEditTranslation(row)">
                     Upravit
                   </button>
-                  <button
-                    class="ghost danger"
-                    type="button"
-                    @click="removeTranslations([row.translation_key])"
-                  >
+                  <button class="ghost danger" type="button" @click="removeTranslations([row.translation_key])">
                     Vymazat
                   </button>
                 </div>
@@ -1241,11 +1154,7 @@ onMounted(async () => {
         </header>
         <div class="language-toolbar">
           <label class="language-toggle">
-            <input
-              type="checkbox"
-              :checked="allLanguagesSelected"
-              @change="toggleSelectAllLanguages"
-            />
+            <input type="checkbox" :checked="allLanguagesSelected" @change="toggleSelectAllLanguages" />
             <span>Vybrat vsetky</span>
           </label>
           <button class="ghost" type="button" @click="selectedLanguageCodes = []">Vycistit</button>
@@ -1269,12 +1178,8 @@ onMounted(async () => {
           <button class="ghost" type="button" @click="showLanguageSelectModal = false">
             Zatvorit
           </button>
-          <button
-            class="primary"
-            type="button"
-            :disabled="!selectedLanguageCodes.length"
-            @click="confirmLanguageSelection"
-          >
+          <button class="primary" type="button" :disabled="!selectedLanguageCodes.length"
+            @click="confirmLanguageSelection">
             Pokracovat
           </button>
         </div>
@@ -1296,11 +1201,7 @@ onMounted(async () => {
         </header>
         <div class="batch-scroll">
           <div class="batch-upload">
-            <input
-              type="file"
-              accept=".csv,.tsv,.txt,.xml"
-              @change="handleBatchFileInput"
-            />
+            <input type="file" accept=".csv,.tsv,.txt,.xml" @change="handleBatchFileInput" />
             <button class="ghost" type="button" @click="exportBatchTemplate">
               Stiahnut CSV template
             </button>
@@ -1371,12 +1272,7 @@ onMounted(async () => {
 
         <div class="modal-actions">
           <button class="ghost" type="button" @click="showBatchModal = false">Zatvorit</button>
-          <button
-            class="primary"
-            type="button"
-            :disabled="!batchRows.length || batchIsSending"
-            @click="submitBatch"
-          >
+          <button class="primary" type="button" :disabled="!batchRows.length || batchIsSending" @click="submitBatch">
             {{ batchIsSending ? 'Odosielam...' : 'Importovat' }}
           </button>
           <button class="ghost" type="button" @click="exportBatchAll">Export all</button>
@@ -1385,50 +1281,50 @@ onMounted(async () => {
     </div>
 
     <div v-if="showPromptsModal" class="modal-backdrop" @click.self="showPromptsModal = false">
-  <div class="modal modal-scroll">
-    <header>
-      <div>
-        <p class="modal-kicker">Prompts</p>
-        <h2>Uprava promptov</h2>
-        <p class="modal-subtitle">Vyber prompt podla nazvu a uprav jeho text.</p>
-      </div>
-      <button class="icon" type="button" @click="showPromptsModal = false">x</button>
-    </header>
+      <div class="modal modal-scroll">
+        <header>
+          <div>
+            <p class="modal-kicker">Prompts</p>
+            <h2>Uprava promptov</h2>
+            <p class="modal-subtitle">Vyber prompt podla nazvu a uprav jeho text.</p>
+          </div>
+          <button class="icon" type="button" @click="showPromptsModal = false">x</button>
+        </header>
 
-    <div class="batch-scroll">
-      <div class="prompt-form">
-        <label>
-          <span>Nazov</span>
-          <select v-model="selectedPromptName">
-            <option value="">Vyber prompt</option>
-            <option v-for="name in promptNames" :key="name" :value="name">{{ name }}</option>
-            <option value="__new__">+ Novy prompt</option>
-          </select>
-        </label>
+        <div class="batch-scroll">
+          <div class="prompt-form">
+            <label>
+              <span>Nazov</span>
+              <select v-model="selectedPromptName">
+                <option value="">Vyber prompt</option>
+                <option v-for="name in promptNames" :key="name" :value="name">{{ name }}</option>
+                <option value="__new__">+ Novy prompt</option>
+              </select>
+            </label>
 
-        <label v-if="selectedPromptName === '__new__'">
-          <span>Novy nazov</span>
-          <input v-model="newPromptName" placeholder="napr. summary_prompt" />
-        </label>
+            <label v-if="selectedPromptName === '__new__'">
+              <span>Novy nazov</span>
+              <input v-model="newPromptName" placeholder="napr. summary_prompt" />
+            </label>
 
-        <label>
-          <span>Prompt text</span>
-          <textarea v-model="promptText" rows="15" placeholder="Sem vloz prompt..."></textarea>
-        </label>
+            <label>
+              <span>Prompt text</span>
+              <textarea v-model="promptText" rows="15" placeholder="Sem vloz prompt..."></textarea>
+            </label>
 
-        <p v-if="promptsLoading">Nacitavam prompty...</p>
-        <p v-if="promptsError" class="error">{{ promptsError }}</p>
+            <p v-if="promptsLoading">Nacitavam prompty...</p>
+            <p v-if="promptsError" class="error">{{ promptsError }}</p>
+          </div>
+        </div>
+
+        <div class="modal-actions">
+          <button class="ghost" type="button" @click="showPromptsModal = false">Zatvorit</button>
+          <button class="primary" type="button" :disabled="promptsSaving" @click="savePrompt">
+            {{ promptsSaving ? 'Ukladam...' : 'Ulozit' }}
+          </button>
+        </div>
       </div>
     </div>
-
-    <div class="modal-actions">
-      <button class="ghost" type="button" @click="showPromptsModal = false">Zatvorit</button>
-      <button class="primary" type="button" :disabled="promptsSaving" @click="savePrompt">
-        {{ promptsSaving ? 'Ukladam...' : 'Ulozit' }}
-      </button>
-    </div>
-  </div>
-</div>
 
     <div v-if="showTranslationModal" class="modal-backdrop">
       <div class="modal modal-scroll">
@@ -1439,41 +1335,24 @@ onMounted(async () => {
           </div>
           <button class="icon" type="button" @click="showTranslationModal = false">x</button>
         </header>
-        <form
-          class="modal-form"
-          @submit.prevent="isEditMode ? updateTranslation() : addTranslation()"
-        >
+        <form class="modal-form" @submit.prevent="isEditMode ? updateTranslation() : addTranslation()">
           <label>
             <span>Translation key</span>
             <input v-model="translationForm.translation_key" required />
           </label>
-          <label>
-            <span>Kategoria</span>
-            <input v-model="translationForm.category" placeholder="napr. onboarding" />
-          </label>
           <div class="translation-grid">
-            <div
-              v-for="(entry, index) in translationForm.translations"
-              :key="`${entry.language_code}-${index}`"
-              class="translation-row"
-            >
-              <label>
-                <span>Jazyk</span>
-                <select v-model="entry.language_code">
-                  <option v-for="lang in languages" :key="lang.code" :value="lang.code">
-                    {{ lang.name }} ({{ lang.code }})
-                  </option>
-                </select>
-              </label>
-              <label>
-                <span>Preklad</span>
-                <textarea
-                  v-model="entry.translated_text"
-                  rows="2"
-                  placeholder="Sem vlozte preklad"
-                ></textarea>
-              </label>
-            </div>
+            <details v-for="(entry, index) in translationForm.translations" :key="`${entry.language_code}-${index}`"
+              class="translation-dropdown">
+              <summary class="translation-summary">
+                {{ getLanguageLabel(entry.language_code) }}
+              </summary>
+              <div class="translation-panel">
+                <label>
+                  <span>Preklad</span>
+                  <textarea v-model="entry.translated_text" rows="2" placeholder="Sem vlozte preklad"></textarea>
+                </label>
+              </div>
+            </details>
           </div>
           <div class="modal-actions">
             <button class="ghost" type="button" @click="showTranslationModal = false">
