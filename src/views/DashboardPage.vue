@@ -12,6 +12,19 @@ type Row = {
   [key: string]: unknown
 }
 
+type TranslationEntry = {
+  language_code: string
+  translated_text: string
+  id?: string
+}
+
+type PivotRow = {
+  translation_key: string
+  category?: string | null
+  last_updated?: string | null
+  translations: Record<string, { id?: string; text: string }>
+}
+
 type Language = {
   code: string
   name: string
@@ -59,7 +72,7 @@ const search = ref('')
 
 const showLanguageModal = ref(false)
 const showTranslationModal = ref(false)
-const showLanguageSelectModal = ref(true)
+const showLanguageSelectModal = ref(false)
 const showBatchModal = ref(false)
 const showPromptsModal = ref(false)
 
@@ -70,9 +83,9 @@ const customPerPage = ref(25)
 const currentPage = ref(1)
 
 const isEditMode = ref(false)
-const editingId = ref<string | null>(null)
+const editingKey = ref<string | null>(null)
 
-const selectedIds = ref<string[]>([])
+const selectedKeys = ref<string[]>([])
 
 const languageForm = ref({
   code: '',
@@ -80,11 +93,14 @@ const languageForm = ref({
   is_active: true,
 })
 
-const translationForm = ref({
+const translationForm = ref<{
+  translation_key: string
+  category: string
+  translations: TranslationEntry[]
+}>({
   translation_key: '',
-  language_code: '',
-  translated_text: '',
   category: '',
+  translations: [],
 })
 
 const nameFilter = ref('')
@@ -129,9 +145,56 @@ const allLanguagesSelected = computed(() => {
 
 const promptNames = computed(() => prompts.value.map((item) => item.name))
 
+const tableRows = computed<PivotRow[]>(() => {
+  const grouped = new Map<string, PivotRow>()
+  rows.value.forEach((row) => {
+    const key = String(row.translation_key ?? '').trim()
+    if (!key) {
+      return
+    }
+    const existing = grouped.get(key)
+    const entry =
+      existing ??
+      ({
+        translation_key: key,
+        category: row.category ?? null,
+        last_updated: row.last_updated ?? null,
+        translations: {},
+      } satisfies PivotRow)
+
+    if (!existing) {
+      grouped.set(key, entry)
+    }
+
+    if (!entry.category && row.category) {
+      entry.category = row.category
+    }
+
+    if (row.last_updated) {
+      const current = entry.last_updated ? new Date(entry.last_updated).getTime() : 0
+      const next = new Date(row.last_updated).getTime()
+      if (!Number.isNaN(next) && next > current) {
+        entry.last_updated = row.last_updated
+      }
+    }
+
+    const lang = String(row.language_code ?? '').trim()
+    if (lang) {
+      entry.translations[lang] = {
+        id: row.id,
+        text: String(row.translated_text ?? ''),
+      }
+    }
+  })
+
+  return Array.from(grouped.values()).sort((a, b) =>
+    a.translation_key.localeCompare(b.translation_key)
+  )
+})
+
 const categories = computed(() => {
   const unique = new Set<string>()
-  rows.value.forEach((row) => {
+  tableRows.value.forEach((row) => {
     const value = String(row.category ?? '').trim()
     if (value) {
       unique.add(value)
@@ -142,12 +205,23 @@ const categories = computed(() => {
 
 const visibleRows = computed(() => {
   if (!search.value.trim()) {
-    return rows.value
+    return tableRows.value
   }
   const query = search.value.toLowerCase()
-  return rows.value.filter((row) =>
-    Object.values(row).some((value) => String(value ?? '').toLowerCase().includes(query))
-  )
+  return tableRows.value.filter((row) => {
+    if (row.translation_key.toLowerCase().includes(query)) {
+      return true
+    }
+    if (String(row.category ?? '').toLowerCase().includes(query)) {
+      return true
+    }
+    if (String(row.last_updated ?? '').toLowerCase().includes(query)) {
+      return true
+    }
+    return Object.values(row.translations).some((entry) =>
+      String(entry.text ?? '').toLowerCase().includes(query)
+    )
+  })
 })
 
 const filteredRows = computed(() => {
@@ -209,18 +283,28 @@ const paginatedRows = computed(() => {
 })
 
 const columns = computed(() => {
-  const first = rows.value[0]
-  if (!first) {
-    return []
-  }
-  return Object.keys(first).filter((column) => column !== 'id')
+  const selected =
+    selectedLanguageCodes.value.length > 0
+      ? selectedLanguageCodes.value
+      : languages.value.map((lang) => lang.code)
+  const languageColumns = selected.map((code) => {
+    const name = languages.value.find((lang) => lang.code === code)?.name
+    return {
+      key: code,
+      label: name ? `${name} (${code})` : code,
+    }
+  })
+  return [
+    { key: 'translation_key', label: 'translation_key' },
+    ...languageColumns,
+  ] as Array<{ key: string; label: string }>
 })
 
 const allSelectedOnPage = computed(() => {
   if (!paginatedRows.value.length) {
     return false
   }
-  return paginatedRows.value.every((row) => selectedIds.value.includes(row.id))
+  return paginatedRows.value.every((row) => selectedKeys.value.includes(row.translation_key))
 })
 
 const loadRows = async () => {
@@ -266,16 +350,14 @@ const loadRows = async () => {
 }
 
 const loadLanguages = async () => {
+  const wasAllSelected = allLanguagesSelected.value
   const { data } = await supabase
     .from('languages')
     .select('code, name, is_active, percent_translated')
     .order('name')
   languages.value = data ?? []
-  if (!selectedLanguageCodes.value.length && languages.value.length) {
-    selectedLanguageCodes.value = [languages.value[0]?.code || '']
-  }
-  if (!translationForm.value.language_code && languages.value.length) {
-    translationForm.value.language_code = languages.value[0]?.code || ''
+  if ((wasAllSelected || !selectedLanguageCodes.value.length) && languages.value.length) {
+    selectedLanguageCodes.value = languages.value.map((lang) => lang.code)
   }
 }
 
@@ -287,13 +369,25 @@ const toggleSelectAllLanguages = () => {
   selectedLanguageCodes.value = languages.value.map((lang) => lang.code)
 }
 
+const buildTranslationEntries = (row?: PivotRow) => {
+  const languageList =
+    selectedLanguageCodes.value.length > 0
+      ? selectedLanguageCodes.value
+      : languages.value.map((lang) => lang.code)
+  return languageList.map((code) => ({
+    language_code: code,
+    translated_text: row?.translations[code]?.text ?? '',
+    id: row?.translations[code]?.id,
+  }))
+}
+
 const confirmLanguageSelection = async () => {
   if (!selectedLanguageCodes.value.length) {
     return
   }
   showLanguageSelectModal.value = false
-  if (!selectedLanguageCodes.value.includes(translationForm.value.language_code)) {
-    translationForm.value.language_code = (selectedLanguageCodes.value[0] || '') as string
+  if (!showTranslationModal.value) {
+    translationForm.value.translations = buildTranslationEntries()
   }
   await loadRows()
 }
@@ -310,12 +404,11 @@ const showNotification = (message: string, type: 'success' | 'error' = 'success'
 const resetTranslationForm = () => {
   translationForm.value = {
     translation_key: '',
-    language_code: (selectedLanguageCodes.value?.[0] || languages.value[0]?.code || '') as string,
-    translated_text: '',
     category: '',
+    translations: buildTranslationEntries(),
   }
   isEditMode.value = false
-  editingId.value = null
+  editingKey.value = null
 }
 
 const resetFilters = () => {
@@ -358,15 +451,14 @@ const openPromptsModal = async () => {
   await loadPrompts()
 }
 
-const openEditTranslation = (row: Row) => {
+const openEditTranslation = (row: PivotRow) => {
   translationForm.value = {
-    translation_key: String(row.translation_key ?? ''),
-    language_code: String(row.language_code ?? selectedLanguageCodes.value[0] ?? ''),
-    translated_text: String(row.translated_text ?? ''),
+    translation_key: row.translation_key,
     category: String(row.category ?? ''),
+    translations: buildTranslationEntries(row),
   }
   isEditMode.value = true
-  editingId.value = row.id
+  editingKey.value = row.translation_key
   showTranslationModal.value = true
 }
 
@@ -448,6 +540,7 @@ const callEdge = async (offset: number) => {
   await processBatch(0)
 
   await loadLanguages()
+  await loadRows()
   resetLanguageForm()
   showLanguageModal.value = false
 }
@@ -487,7 +580,7 @@ const wipeAllData = async () => {
     return
   }
 
-  selectedIds.value = []
+  selectedKeys.value = []
   await Promise.all([loadLanguages(), loadRows()])
   showNotification('Vsetky data boli vymazane, zostala iba anglictina.', 'success')
   isWipingAll.value = false
@@ -553,84 +646,131 @@ const savePrompt = async () => {
   promptsSaving.value = false
 }
 
-const addTranslation = async () => {
+const saveTranslations = async () => {
   errorMessage.value = ''
-  const payload = {
-    translation_key: (translationForm.value.translation_key ?? '').trim(),
-    language_code: translationForm.value.language_code || '',
-    translated_text: (translationForm.value.translated_text ?? '').trim(),
-    category: (translationForm.value.category ?? '').trim() || null,
+  const translationKey = translationForm.value.translation_key.trim()
+  if (!translationKey) {
+    errorMessage.value = 'Vyplnte translation key.'
+    return
   }
 
-  const { error } = await supabase.from('translations').insert(payload)
-  if (error) {
-    errorMessage.value = error.message
-    return
+  const category = (translationForm.value.category ?? '').trim() || null
+  const originalKey = editingKey.value
+
+  if (originalKey) {
+    const updatePayload = {
+      translation_key: translationKey,
+      category,
+    }
+    const { error } = await supabase
+      .from('translations')
+      .update(updatePayload)
+      .eq('translation_key', originalKey)
+    if (error) {
+      errorMessage.value = error.message
+      return
+    }
+  }
+
+  const inserts: Array<{
+    translation_key: string
+    language_code: string
+    translated_text: string
+    category: string | null
+  }> = []
+
+  const seenLanguages = new Set<string>()
+
+  for (const entry of translationForm.value.translations) {
+    const languageCode = entry.language_code
+    if (!languageCode || seenLanguages.has(languageCode)) {
+      continue
+    }
+    seenLanguages.add(languageCode)
+    const translatedText = (entry.translated_text ?? '').trim()
+
+    if (entry.id) {
+      const { error } = await supabase
+        .from('translations')
+        .update({
+          translated_text: translatedText,
+          language_code: languageCode,
+        })
+        .eq('id', entry.id)
+      if (error) {
+        errorMessage.value = error.message
+        return
+      }
+      continue
+    }
+
+    if (translatedText) {
+      inserts.push({
+        translation_key: translationKey,
+        language_code: languageCode,
+        translated_text: translatedText,
+        category,
+      })
+    }
+  }
+
+  if (inserts.length) {
+    const { error } = await supabase.from('translations').insert(inserts)
+    if (error) {
+      errorMessage.value = error.message
+      return
+    }
   }
 
   await loadRows()
   resetTranslationForm()
   showTranslationModal.value = false
+}
+
+const addTranslation = async () => {
+  editingKey.value = null
+  await saveTranslations()
 }
 
 const updateTranslation = async () => {
-  if (!editingId.value) {
-    return
-  }
-  errorMessage.value = ''
-  const payload = {
-    translation_key: (translationForm.value.translation_key ?? '').trim(),
-    language_code: translationForm.value.language_code || '',
-    translated_text: (translationForm.value.translated_text ?? '').trim(),
-    category: (translationForm.value.category ?? '').trim() || null,
-  }
-
-  const { error } = await supabase.from('translations').update(payload).eq('id', editingId.value)
-  if (error) {
-    errorMessage.value = error.message
-    return
-  }
-
-  await loadRows()
-  resetTranslationForm()
-  showTranslationModal.value = false
+  await saveTranslations()
 }
 
-const removeTranslations = async (ids: string[]) => {
-  if (!ids.length) {
+const removeTranslations = async (keys: string[]) => {
+  if (!keys.length) {
     return
   }
-  const confirmed = window.confirm(`Naozaj chcete vymazat ${ids.length} zaznam(ov)?`)
+  const confirmed = window.confirm(`Naozaj chcete vymazat ${keys.length} kluc(ov)?`)
   if (!confirmed) {
     return
   }
   errorMessage.value = ''
-  const { error } = await supabase.from('translations').delete().in('id', ids)
+  const { error } = await supabase.from('translations').delete().in('translation_key', keys)
   if (error) {
     errorMessage.value = error.message
     return
   }
-  selectedIds.value = selectedIds.value.filter((id) => !ids.includes(id))
+  selectedKeys.value = selectedKeys.value.filter((key) => !keys.includes(key))
   await loadRows()
 }
 
-const toggleSelectRow = (id: string) => {
-  if (selectedIds.value.includes(id)) {
-    selectedIds.value = selectedIds.value.filter((selected) => selected !== id)
+const toggleSelectRow = (key: string) => {
+  if (selectedKeys.value.includes(key)) {
+    selectedKeys.value = selectedKeys.value.filter((selected) => selected !== key)
   } else {
-    selectedIds.value = [...selectedIds.value, id]
+    selectedKeys.value = [...selectedKeys.value, key]
   }
 }
 
 const toggleSelectAllOnPage = () => {
   if (allSelectedOnPage.value) {
-    const pageIds = paginatedRows.value.map((row) => row.id)
-    selectedIds.value = selectedIds.value.filter((id) => !pageIds.includes(id))
+    const pageKeys = paginatedRows.value.map((row) => row.translation_key)
+    selectedKeys.value = selectedKeys.value.filter((key) => !pageKeys.includes(key))
     return
   }
-  const pageIds = paginatedRows.value.map((row) => row.id)
-  const combined = new Set([...selectedIds.value, ...pageIds])
-  selectedIds.value = Array.from(combined)
+  const pageKeys = paginatedRows.value.map((row) => row.translation_key)
+  const combined = new Set([...selectedKeys.value, ...pageKeys])
+  selectedKeys.value = Array.from(combined)
 }
 
 const goToPage = (page: number) => {
@@ -892,8 +1032,11 @@ watch(totalPages, (pages) => {
 })
 
 watch(selectedLanguageCodes, () => {
-  selectedIds.value = []
+  selectedKeys.value = []
   currentPage.value = 1
+  if (!showTranslationModal.value) {
+    translationForm.value.translations = buildTranslationEntries()
+  }
 })
 
 watch(selectedPromptName, () => {
@@ -908,6 +1051,8 @@ watch(selectedPromptName, () => {
 
 onMounted(async () => {
   await loadLanguages()
+  resetTranslationForm()
+  await loadRows()
 })
 </script>
 
@@ -935,12 +1080,12 @@ onMounted(async () => {
         </button>
         <button class="ghost" type="button" @click="showLanguageModal = true">Pridat jazyk</button>
         <button
-          v-if="selectedIds.length"
+          v-if="selectedKeys.length"
           class="ghost danger"
           type="button"
-          @click="removeTranslations(selectedIds)"
+          @click="removeTranslations(selectedKeys)"
         >
-          Vymazat vybrane ({{ selectedIds.length }})
+          Vymazat vybrane ({{ selectedKeys.length }})
         </button>
       </div>
     </header>
@@ -1030,7 +1175,7 @@ onMounted(async () => {
       </div>
 
       <div class="table-wrap">
-        <table v-if="columns.length" class="data-table">
+        <table v-if="columns.length && paginatedRows.length" class="data-table">
           <thead>
             <tr>
               <th class="select-col">
@@ -1041,22 +1186,23 @@ onMounted(async () => {
                   aria-label="Select all"
                 />
               </th>
-              <th v-for="column in columns" :key="column">{{ column }}</th>
+              <th v-for="column in columns" :key="column.key">{{ column.label }}</th>
               <th class="actions-col"></th>
             </tr>
           </thead>
           <tbody>
-            <tr v-for="row in paginatedRows" :key="row.id" class="data-row">
+            <tr v-for="row in paginatedRows" :key="row.translation_key" class="data-row">
               <td class="select-col">
                 <input
                   type="checkbox"
-                  :checked="selectedIds.includes(row.id)"
-                  @change="toggleSelectRow(row.id)"
+                  :checked="selectedKeys.includes(row.translation_key)"
+                  @change="toggleSelectRow(row.translation_key)"
                   aria-label="Select row"
                 />
               </td>
-              <td v-for="column in columns" :key="column">
-                {{ row[column] ?? '-' }}
+              <td v-for="column in columns" :key="column.key">
+                <span v-if="column.key === 'translation_key'">{{ row.translation_key }}</span>
+                <span v-else>{{ row.translations[column.key]?.text ?? '-' }}</span>
               </td>
               <td class="actions-col">
                 <div class="row-actions">
@@ -1066,7 +1212,7 @@ onMounted(async () => {
                   <button
                     class="ghost danger"
                     type="button"
-                    @click="removeTranslations([row.id])"
+                    @click="removeTranslations([row.translation_key])"
                   >
                     Vymazat
                   </button>
@@ -1285,7 +1431,7 @@ onMounted(async () => {
 </div>
 
     <div v-if="showTranslationModal" class="modal-backdrop">
-      <div class="modal">
+      <div class="modal modal-scroll">
         <header>
           <div>
             <p class="modal-kicker">Translations</p>
@@ -1302,21 +1448,33 @@ onMounted(async () => {
             <input v-model="translationForm.translation_key" required />
           </label>
           <label>
-            <span>Jazyk</span>
-            <select v-model="translationForm.language_code" required>
-              <option v-for="lang in languages" :key="lang.code" :value="lang.code">
-                {{ lang.name }} ({{ lang.code }})
-              </option>
-            </select>
-          </label>
-          <label>
-            <span>Prelozeny text</span>
-            <textarea v-model="translationForm.translated_text" rows="4" required></textarea>
-          </label>
-          <label>
             <span>Kategoria</span>
             <input v-model="translationForm.category" placeholder="napr. onboarding" />
           </label>
+          <div class="translation-grid">
+            <div
+              v-for="(entry, index) in translationForm.translations"
+              :key="`${entry.language_code}-${index}`"
+              class="translation-row"
+            >
+              <label>
+                <span>Jazyk</span>
+                <select v-model="entry.language_code">
+                  <option v-for="lang in languages" :key="lang.code" :value="lang.code">
+                    {{ lang.name }} ({{ lang.code }})
+                  </option>
+                </select>
+              </label>
+              <label>
+                <span>Preklad</span>
+                <textarea
+                  v-model="entry.translated_text"
+                  rows="2"
+                  placeholder="Sem vlozte preklad"
+                ></textarea>
+              </label>
+            </div>
+          </div>
           <div class="modal-actions">
             <button class="ghost" type="button" @click="showTranslationModal = false">
               Zrusit
@@ -1370,7 +1528,3 @@ onMounted(async () => {
   </div>
 </template>
 <style src="../assets/dashboard.css"></style>
-
-
-
-

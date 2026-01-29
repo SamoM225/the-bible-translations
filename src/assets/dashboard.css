@@ -483,6 +483,29 @@
   overflow-x: hidden;
 }
 
+.translation-grid {
+  display: grid;
+  gap: 12px;
+  max-height: 45vh;
+  overflow: auto;
+  padding-right: 4px;
+}
+
+.translation-row {
+  display: grid;
+  grid-template-columns: minmax(160px, 220px) 1fr;
+  gap: 12px;
+  align-items: start;
+  padding: 12px;
+  border-radius: 14px;
+  border: 1px solid var(--border);
+  background: #f8fafc;
+}
+
+.translation-row label {
+  margin: 0;
+}
+
 .modal-subtitle {
   margin-top: 6px;
   font-size: 13px;
@@ -500,6 +523,10 @@
 
   .modal-scroll .batch-scroll {
     max-height: 60vh;
+  }
+
+  .translation-row {
+    grid-template-columns: 1fr;
   }
 }
 .filter-bar {
